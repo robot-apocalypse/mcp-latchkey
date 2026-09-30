@@ -1,0 +1,12 @@
+{
+  "name": "mcp-latchkey-spike",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc", "start": "node dist/spike.js" },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.8.0" }
+}
