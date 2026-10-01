@@ -50,7 +50,11 @@ authorization server work. Tokens can be scoped to a service via `resource`.
 - A fresh public Funnel hostname is scanned within minutes: `.env`, `.git/config`,
   `.aws/credentials`, `.env.anthropic`, `/anthropic/config.json`, SQL dumps.
   Latchkey must 404 everything outside its routes and never serve files.
-- Refresh-token behaviour: pending (tokens issued with `expires_in: 3600`).
+- **Refresh** (observed 17:09Z, ~1h after connecting): Claude refreshed
+  proactively (no 401 first) with `grant_type=refresh_token`, `client_id` (the
+  CIMD URL) and `resource` (the service URL), form-encoded, from its backend.
+  Not the `jwt-bearer` grant its metadata also lists. It accepted a rotated
+  refresh token; latchkey's non-rotating one works too.
 
 ## Design consequences
 
