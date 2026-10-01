@@ -34,12 +34,14 @@ export class Upstream {
     readonly name: string,
     private readonly def: ServiceConfig,
     private readonly dataDir: string,
-    private readonly log: Log
+    private readonly log: Log,
+    /** HOME for a stdio child; defaults to <dataDir>/<name>. */
+    private readonly homeDir?: string
   ) {}
 
   private transport() {
     if (this.def.stdio) {
-      const home = path.resolve(this.dataDir, this.name)
+      const home = this.homeDir ?? path.resolve(this.dataDir, this.name)
       fs.mkdirSync(home, { recursive: true, mode: 0o700 })
       const t = new StdioClientTransport({
         command: this.def.stdio.command,
@@ -175,6 +177,38 @@ function firstText(r: CallToolResult): string {
   return c && c.type === 'text' ? c.text.slice(0, 300) : ''
 }
 
+/** Serves one MCP HTTP request against an upstream, reporting each tool call to `audit`. */
+export async function serveUpstream(up: Upstream, request: Request, audit: (line: Record<string, unknown>) => void): Promise<Response> {
+  // Instructions only matter on initialize; fetch them only then, and don't
+  // fail the request over them.
+  let instructions: string | undefined
+  if (request.method === 'POST') {
+    const body = await request.clone().text().catch(() => '')
+    if (body.includes('"initialize"')) instructions = await up.instructions().catch(() => undefined)
+  }
+
+  const server = new Server({ name: `latchkey/${up.name}`, version: '0.1.0' }, { capabilities: { tools: {} }, instructions })
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await up.listTools() }))
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const started = Date.now()
+    try {
+      const r = await up.callTool(req.params)
+      audit({ tool: req.params.name, ok: !r.isError, ms: Date.now() - started })
+      return r
+    } catch (e) {
+      audit({ tool: req.params.name, ok: false, ms: Date.now() - started, error: String(e).slice(0, 300) })
+      // Details go to the log, not to the client.
+      return { content: [{ type: 'text', text: `The ${up.name} service failed to handle this call.` }], isError: true }
+    }
+  })
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+  transport.onclose = () => {
+    server.close().catch(() => {})
+  }
+  await server.connect(transport)
+  return transport.handleRequest(request)
+}
+
 /** Builds one Upstream per stdio/http service and the MCP handler that serves them. */
 export function createUpstreams(cfg: Config, log: Log): { upstreams: Map<string, Upstream>; handler: McpHandler } {
   const upstreams = new Map<string, Upstream>()
@@ -187,35 +221,7 @@ export function createUpstreams(cfg: Config, log: Log): { upstreams: Map<string,
     if (!up) {
       return Response.json({ error: 'upstream_not_configured', error_description: `service "${service}" has no upstream` }, { status: 501 })
     }
-
-    // Instructions only matter on initialize; fetch them only then, and don't
-    // fail the request over them.
-    let instructions: string | undefined
-    if (request.method === 'POST') {
-      const body = await request.clone().text().catch(() => '')
-      if (body.includes('"initialize"')) instructions = await up.instructions().catch(() => undefined)
-    }
-
-    const server = new Server({ name: `latchkey/${service}`, version: '0.1.0' }, { capabilities: { tools: {} }, instructions })
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await up.listTools() }))
-    server.setRequestHandler(CallToolRequestSchema, async (req) => {
-      const started = Date.now()
-      try {
-        const r = await up.callTool(req.params)
-        log({ event: 'tool', user: grant.user, service, tool: req.params.name, ok: !r.isError, ms: Date.now() - started })
-        return r
-      } catch (e) {
-        log({ event: 'tool', user: grant.user, service, tool: req.params.name, ok: false, ms: Date.now() - started, error: String(e).slice(0, 300) })
-        // Details go to the log, not to the client.
-        return { content: [{ type: 'text', text: `The ${service} service failed to handle this call.` }], isError: true }
-      }
-    })
-    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-    transport.onclose = () => {
-      server.close().catch(() => {})
-    }
-    await server.connect(transport)
-    return transport.handleRequest(request)
+    return serveUpstream(up, request, (line) => log({ event: 'tool', user: grant.user, service, ...line }))
   }
 
   return { upstreams, handler }

@@ -58,26 +58,43 @@ Check it with `latchkey check-config` (in Docker:
 ### stdio servers
 
 Latchkey keeps exactly one process per stdio service and runs calls to it one
-at a time. The process gets only the `env` you list, `PATH`,
-`HOME=<data_dir>/<service>` (so credentials it writes survive restarts) and the
-MCP SDK's non-secret defaults (`LOGNAME`, `SHELL`, `TERM`, `USER`); never
-latchkey's own environment or secrets. The image includes Node.js, so `npx`
-packages work:
+at a time. There are two ways to run one:
+
+**In its own container (recommended).** `latchkey bridge` runs a single stdio
+server and exposes it over HTTP, requiring a shared secret. The server gets its
+own process tree and network: it cannot read latchkey's secrets or reach other
+upstreams on `127.0.0.1`. Bake the server into the image so nothing is fetched
+at runtime:
+
+```dockerfile
+FROM ghcr.io/robot-apocalypse/mcp-latchkey:edge
+USER root
+RUN npm install -g --omit=dev @togglhq/mcp@1.11.88 && npm cache clean --force
+USER node
+ENV HOME=/data
+CMD ["latchkey", "bridge", "--listen", "0.0.0.0:3200", "--", "toggl-mcp"]
+```
+
+Give it `BRIDGE_TOKEN` (`openssl rand -hex 32`), put it on a Docker network the
+latchkey sidecar also joins (and nothing else), and add it as an `http`
+upstream:
 
 ```yaml
   toggl:
     allow: [alex]
-    stdio:
-      command: npx
-      args: [-y, "@togglhq/mcp@1.11.88"]   # pin versions
-      env: { TOGGL_SENTRY: "off", NPM_CONFIG_UPDATE_NOTIFIER: "false" }
+    http:
+      url: http://toggl:3200/mcp
+      headers: { Authorization: "Bearer ${TOGGL_BRIDGE_TOKEN}" }
     hide_tools: [auth, logout]             # tools that make no sense remotely
     keepalive: { tool: workspace, args: { action: get-context }, every: 24h }
 ```
 
-If the server needs a one-time interactive sign-in, run it in the container
-with the same `HOME`, for example
-`docker compose exec latchkey sh -c 'HOME=/data/toggl npx -y @togglhq/mcp@1.11.88 auth --manual'`.
+**Inside latchkey (trusted servers only).** `stdio: { command, args, env }`
+starts the server as a child of latchkey. It gets only the `env` you list,
+`PATH`, `HOME=<data_dir>/<service>` and the MCP SDK's non-secret defaults, but
+it runs as the same user in the same container, so it **can** read latchkey's
+secrets through `/proc` and reach anything on `127.0.0.1`. Only use this for
+code you trust as much as latchkey itself.
 
 ### HTTP servers
 

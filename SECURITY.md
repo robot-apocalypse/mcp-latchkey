@@ -17,8 +17,11 @@ Latchkey decides **who** may reach **which** MCP service. In scope:
   `/authorize`, `/token`, PKCE, `resource` binding, redirect URI handling.
 - Sign-in via the configured OIDC provider and identity binding.
 - Token storage (hashed, encrypted at rest) and revocation.
-- The boundary to upstreams: environment passed to stdio servers, headers sent
+- The boundary to upstreams: the `latchkey bridge` shared secret, headers sent
   to HTTP servers, hidden tools.
+- Not a sandbox: a stdio server run *inside* latchkey (`stdio:`) shares its
+  user, container and network, and can read its secrets. Run untrusted servers
+  with `latchkey bridge` in their own container.
 
 Out of scope, by design:
 

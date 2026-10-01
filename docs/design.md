@@ -69,7 +69,10 @@ Verified against claude.ai in `spike-results.md`.
   Streamable HTTP client) and serves it back per request with the low-level
   `Server`, passing tool JSON Schemas through unchanged. Uniform tool hiding,
   keepalive and audit logging across upstream types.
-- **stdio upstreams:** exactly one long-lived child per service, spawned lazily,
+- **stdio upstreams:** run untrusted ones with `latchkey bridge` in their own
+  container (2026-10-01 pentest: an in-process child runs as latchkey's uid and
+  can read its secrets from `/proc/1/environ` and reach `127.0.0.1` upstreams).
+  In-process children are for trusted servers. Either way: exactly one long-lived child per service, spawned lazily,
   respawned on exit, calls serialized (mutation confirm tokens and rotating
   upstream credentials live in that one process). Each child gets **only**
   `PATH`, the env listed for that service in config, its own `HOME` under

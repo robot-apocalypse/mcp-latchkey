@@ -57,8 +57,11 @@ const serviceSchema = z
         command: z.string().min(1),
         args: z.array(z.string()).default([]),
         // The child gets ONLY these, PATH, HOME (= <data_dir>/<service>) and the
-        // MCP SDK's non-secret defaults (LOGNAME, SHELL, TERM, USER); never
-        // latchkey's own environment.
+        // MCP SDK's non-secret defaults (LOGNAME, SHELL, TERM, USER). It still
+        // runs as latchkey's user in latchkey's container, so it can read
+        // latchkey's secrets via /proc and reach anything on 127.0.0.1: use it
+        // only for trusted servers. Run anything else with `latchkey bridge`
+        // in its own container and connect to it as an `http` upstream.
         env: z.record(envName, z.string()).default({}),
         cwd: z.string().optional()
       })

@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util'
 import { serve } from '@hono/node-server'
 import { createApp } from './app.js'
+import { createBridge } from './bridge.js'
 import { builtinHandler } from './builtin.js'
 import { createUpstreams } from './upstream.js'
 import { getService, loadConfig, serviceResource, type Config } from './config.js'
@@ -19,6 +20,9 @@ Commands:
   tokens revoke (--id ID | --user U | --service S)...
   users                         list users, their access and bound IdP accounts
   users unbind <user>           forget a user's bound IdP account and revoke their tokens
+  bridge [--listen H:P] -- <command> [args...]
+                                run one stdio MCP server as an HTTP upstream in its own
+                                container; requires BRIDGE_TOKEN (>= 32 chars) in the env
 
 Options:
   -c, --config <path>           config file (default: $LATCHKEY_CONFIG or ./latchkey.yaml)
@@ -47,6 +51,7 @@ async function main(argv: string[]): Promise<number> {
       user: { type: 'string' },
       service: { type: 'string' },
       id: { type: 'string' },
+      listen: { type: 'string' },
       help: { type: 'boolean', short: 'h' }
     }
   })
@@ -54,6 +59,32 @@ async function main(argv: string[]): Promise<number> {
   if (values.help || !cmd) {
     process.stdout.write(USAGE)
     return cmd ? 0 : 1
+  }
+
+  if (cmd === 'bridge') {
+    // Everything after `bridge` (and an optional `--`) is the command line.
+    const sep = argv.indexOf('--')
+    const command = sep >= 0 ? argv.slice(sep + 1) : positionals.slice(1)
+    if (command.length === 0) {
+      console.error('usage: latchkey bridge [--listen host:port] -- <command> [args...]')
+      return 1
+    }
+    const [host, port] = (values.listen ?? '0.0.0.0:3200').split(':')
+    const bridge = createBridge({
+      listen: { host: host || '0.0.0.0', port: Number(port) || 3200 },
+      token: process.env.BRIDGE_TOKEN ?? '',
+      command: command[0]!,
+      args: command.slice(1),
+      home: process.env.HOME ?? '/data'
+    })
+    const server = bridge.start()
+    const shutdown = () => {
+      server.close()
+      void bridge.upstream.close().finally(() => process.exit(0))
+    }
+    process.once('SIGTERM', shutdown)
+    process.once('SIGINT', shutdown)
+    return -1
   }
 
   const configPath = values.config ?? process.env.LATCHKEY_CONFIG ?? './latchkey.yaml'
