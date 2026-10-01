@@ -2,7 +2,9 @@
 
 Two dummy services (`/a/mcp`, `/b/mcp`) on one host
 (`latchkey-spike.your-tailnet.ts.net`) behind one authorization server,
-connected as two claude.ai custom connectors. Source: `spike/src/spike.ts`.
+connected as two claude.ai custom connectors. The throwaway spike server is in the
+git history (commit "start mcp-latchkey ... Phase 0 spike"); it auto-approved
+sign-ins, so it was removed from the tree.
 
 ## Answers
 
