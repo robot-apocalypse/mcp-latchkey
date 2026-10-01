@@ -4,7 +4,7 @@ import { serve } from '@hono/node-server'
 import { createApp } from './app.js'
 import { builtinHandler } from './builtin.js'
 import { createUpstreams } from './upstream.js'
-import { loadConfig, serviceResource, type Config } from './config.js'
+import { getService, loadConfig, serviceResource, type Config } from './config.js'
 import { createIdp } from './idp.js'
 import { Store } from './store/store.js'
 
@@ -70,7 +70,7 @@ async function main(argv: string[]): Promise<number> {
         store: store(),
         idp: createIdp(cfg),
         log,
-        mcp: (service, grant, request) => (cfg.services[service]?.builtin ? builtin(service, grant, request) : handler(service, grant, request))
+        mcp: (service, grant, request) => (getService(cfg, service)?.builtin ? builtin(service, grant, request) : handler(service, grant, request))
       })
       const server = serve({ fetch: app.fetch, port: cfg.listen.port, hostname: cfg.listen.host }, (info) => {
         log({ event: 'listening', address: `${info.address}:${info.port}`, issuer: cfg.issuer, services: Object.keys(cfg.services) })

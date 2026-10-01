@@ -2,7 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { McpHandler } from './app.js'
-import type { Config } from './config.js'
+import { getUser, type Config } from './config.js'
 
 // Built-in diagnostic service: `services.<name>.builtin: whoami` serves one
 // tool that reports who latchkey thinks is calling. Use it to check sign-in and
@@ -28,7 +28,7 @@ export function builtinHandler(cfg: Config): McpHandler {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ user: grant.user, email: cfg.users[grant.user]?.email, service, client: grant.clientId, issuer: cfg.issuer })
+            text: JSON.stringify({ user: grant.user, email: getUser(cfg, grant.user)?.email, service, client: grant.clientId, issuer: cfg.issuer })
           }
         ]
       }

@@ -34,8 +34,14 @@ function isSecureUrl(u: string): boolean {
   return url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
 }
 
+// ASCII only: Unicode case folding makes e.g. "\u212Aate@x" (Kelvin sign)
+// lowercase to "kate@x", which would let a look-alike address match.
+const ASCII_EMAIL = /^[\x21-\x7e]+$/
 const userSchema = z.strictObject({
-  email: z.email().transform((e) => e.toLowerCase())
+  email: z
+    .email()
+    .refine((e) => ASCII_EMAIL.test(e), 'email must be ASCII')
+    .transform((e) => e.toLowerCase())
 })
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
@@ -120,7 +126,7 @@ const configSchema = z
   .superRefine((cfg, ctx) => {
     for (const [svc, def] of Object.entries(cfg.services)) {
       for (const u of def.allow) {
-        if (!cfg.users[u]) ctx.addIssue({ code: 'custom', path: ['services', svc, 'allow'], message: `unknown user "${u}"` })
+        if (!Object.hasOwn(cfg.users, u)) ctx.addIssue({ code: 'custom', path: ['services', svc, 'allow'], message: `unknown user "${u}"` })
       }
     }
     const emails = new Map<string, string>()
@@ -166,13 +172,23 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   return parseConfig(fs.readFileSync(path, 'utf8'), env)
 }
 
+/** Own keys only: config maps are plain objects, so "constructor" or "__proto__" must not resolve. */
+export function getService(cfg: Config, name: string): ServiceConfig | undefined {
+  return Object.hasOwn(cfg.services, name) ? cfg.services[name] : undefined
+}
+
+export function getUser(cfg: Config, name: string): Config['users'][string] | undefined {
+  return Object.hasOwn(cfg.users, name) ? cfg.users[name] : undefined
+}
+
 export function userByEmail(cfg: Config, email: string): string | undefined {
+  if (!ASCII_EMAIL.test(email)) return undefined
   const e = email.toLowerCase()
   return Object.entries(cfg.users).find(([, u]) => u.email === e)?.[0]
 }
 
 export function isAllowed(cfg: Config, user: string, service: string): boolean {
-  return !!cfg.users[user] && (cfg.services[service]?.allow.includes(user) ?? false)
+  return !!getUser(cfg, user) && (getService(cfg, service)?.allow.includes(user) ?? false)
 }
 
 export function serviceResource(cfg: Config, service: string): string {

@@ -1,9 +1,11 @@
 import crypto from 'node:crypto'
 import { Hono, type Context } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { cors } from 'hono/cors'
-import { isAllowed, serviceForResource, serviceResource, userByEmail, type Config } from './config.js'
+import { getService, isAllowed, serviceForResource, serviceResource, userByEmail, type Config } from './config.js'
 import { idpCallbackPath, type Idp } from './idp.js'
 import { ClientError, resolveClient } from './oauth/clients.js'
+import { Sealer } from './seal.js'
 import type { Grant, Store } from './store/store.js'
 
 /** Serves an authenticated MCP request for one service (Phase 2: the upstream bridge). */
@@ -18,16 +20,25 @@ export interface AppDeps {
   log?: (line: Record<string, unknown>) => void
 }
 
+/** Sealed into the IdP `state` parameter (see seal.ts); nothing kept server-side. */
 interface PendingAuthorize {
   clientId: string
+  clientName?: string
   redirectUri: string
   state: string
   codeChallenge: string
   service: string
-  idpState: string
   idpNonce: string
   idpVerifier: string
-  expiresAt: number
+}
+
+/** Sealed into the consent form after sign-in. */
+interface PendingConsent {
+  grant: Grant
+  clientName?: string
+  redirectUri: string
+  state: string
+  codeChallenge: string
 }
 
 interface PendingCode {
@@ -38,20 +49,27 @@ interface PendingCode {
 }
 
 const AUTHORIZE_TTL_MS = 10 * 60 * 1000
+const CONSENT_TTL_MS = 10 * 60 * 1000
 const CODE_TTL_MS = 60 * 1000
 const MAX_PENDING = 1000
+// Small OAuth bodies; MCP messages can be larger but are authenticated first.
+const OAUTH_BODY_LIMIT = 16 * 1024
+const MCP_BODY_LIMIT = 4 * 1024 * 1024
 
 const random = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url')
 
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
 
-function page(c: Context, status: 400 | 403 | 500, title: string, body: string) {
-  c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'")
+// HTML is only ever latchkey's own small pages: no scripts, no framing (the
+// consent button must not be clickjackable), forms may only post back here.
+function page(c: Context, status: 200 | 400 | 403 | 500, title: string, body: string, extraHtml = '') {
+  c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+  c.header('X-Frame-Options', 'DENY')
   c.header('Cache-Control', 'no-store')
   return c.html(
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(title)}</title>` +
-      `<body style="font:16px system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.25rem">${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p>`,
+      `<body style="font:16px system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem;line-height:1.5"><h1 style="font-size:1.25rem">${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p>${extraHtml}`,
     status
   )
 }
@@ -67,19 +85,21 @@ function verifyPkce(verifier: string | undefined, challenge: string): boolean {
 async function readTokenBody(c: Context): Promise<Record<string, string>> {
   const ct = c.req.header('content-type') ?? ''
   if (ct.includes('application/json')) {
-    const j = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+    const j: unknown = await c.req.json().catch(() => ({}))
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return {}
     return Object.fromEntries(Object.entries(j).filter(([, v]) => typeof v === 'string')) as Record<string, string>
   }
   return Object.fromEntries(new URLSearchParams(await c.req.text()))
 }
 
-/** Bounded map with lazy expiry: a public endpoint must not be able to grow memory without limit. */
+/** Bounded map with lazy expiry. Only filled after a successful sign-in. */
 class Expiring<T extends { expiresAt: number }> {
   private m = new Map<string, T>()
-  set(k: string, v: T) {
+  set(k: string, v: T): boolean {
     if (this.m.size >= MAX_PENDING) this.sweep()
-    if (this.m.size >= MAX_PENDING) this.m.delete(this.m.keys().next().value!)
+    if (this.m.size >= MAX_PENDING) return false
     this.m.set(k, v)
+    return true
   }
   take(k: string): T | undefined {
     const v = this.m.get(k)
@@ -95,7 +115,7 @@ class Expiring<T extends { expiresAt: number }> {
 export function createApp(deps: AppDeps): Hono {
   const { cfg, store, idp } = deps
   const log = deps.log ?? ((line) => console.log(JSON.stringify({ t: new Date().toISOString(), ...line })))
-  const pendingAuth = new Expiring<PendingAuthorize>()
+  const sealer = new Sealer(cfg.encryption_key)
   const pendingCodes = new Expiring<PendingCode>()
   const ttl = cfg.oauth.access_token_ttl
   const idle = cfg.oauth.refresh_token_idle_ttl
@@ -105,8 +125,15 @@ export function createApp(deps: AppDeps): Hono {
   // Paths only: query strings carry codes and state.
   app.use('*', async (c, next) => {
     await next()
+    c.header('Strict-Transport-Security', 'max-age=31536000')
+    c.header('X-Content-Type-Options', 'nosniff')
+    c.header('Referrer-Policy', 'no-referrer')
     log({ event: 'http', method: c.req.method, path: c.req.path, status: c.res.status })
   })
+  const tooLarge = bodyLimit({ maxSize: OAUTH_BODY_LIMIT, onError: (c) => c.json({ error: 'invalid_request', error_description: 'body too large' }, 413) })
+  app.use('/token', tooLarge)
+  app.use('/register', tooLarge)
+  app.use('/consent', tooLarge)
   app.use('/.well-known/*', cors())
   app.use('/register', cors())
   app.use('/token', cors())
@@ -133,7 +160,7 @@ export function createApp(deps: AppDeps): Hono {
   // root document: clients find the right one via WWW-Authenticate.
   app.get('/.well-known/oauth-protected-resource/:service/mcp', (c) => {
     const service = c.req.param('service')
-    if (!cfg.services[service]) return c.notFound()
+    if (!getService(cfg, service)) return c.notFound()
     c.header('Cache-Control', 'no-store')
     return c.json({
       resource: serviceResource(cfg, service),
@@ -199,20 +226,21 @@ export function createApp(deps: AppDeps): Hono {
       return page(c, 400, 'Invalid sign-in request', 'Missing or unsupported parameters (code flow with PKCE S256 and a known resource are required).')
     }
 
-    const idpState = random()
+    if (q.state.length > 1024 || q.code_challenge.length > 128) return page(c, 400, 'Invalid sign-in request', 'Parameter too long.')
+
     const idpNonce = random()
     const idpVerifier = random()
-    pendingAuth.set(idpState, {
+    const pending: PendingAuthorize = {
       clientId: client.clientId,
+      clientName: client.name,
       redirectUri: q.redirect_uri,
       state: q.state,
       codeChallenge: q.code_challenge,
       service,
-      idpState,
       idpNonce,
-      idpVerifier,
-      expiresAt: Date.now() + AUTHORIZE_TTL_MS
-    })
+      idpVerifier
+    }
+    const idpState = sealer.seal('idp-state', pending, AUTHORIZE_TTL_MS)
     try {
       const url = await idp.authorizationUrl({ state: idpState, nonce: idpNonce, codeVerifier: idpVerifier })
       return c.redirect(url.toString())
@@ -224,8 +252,8 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get(idpCallbackPath, async (c) => {
     const idpState = c.req.query('state') ?? ''
-    const pending = pendingAuth.take(idpState)
-    if (!pending) return page(c, 400, 'Sign-in expired', 'This sign-in link has expired or was already used. Start again from your MCP client.')
+    const pending = sealer.open<PendingAuthorize>('idp-state', idpState)
+    if (!pending) return page(c, 400, 'Sign-in expired', 'This sign-in link has expired or is invalid. Start again from your MCP client.')
 
     const back = (params: Record<string, string>) => {
       const url = new URL(pending.redirectUri)
@@ -243,7 +271,7 @@ export function createApp(deps: AppDeps): Hono {
       // Rebuild the callback URL from the configured issuer: behind a proxy
       // the request URL's host/scheme are not the public ones.
       const callbackUrl = new URL(`${cfg.issuer}${idpCallbackPath}${new URL(c.req.url).search}`)
-      identity = await idp.exchange(callbackUrl, { state: pending.idpState, nonce: pending.idpNonce, codeVerifier: pending.idpVerifier })
+      identity = await idp.exchange(callbackUrl, { state: idpState, nonce: pending.idpNonce, codeVerifier: pending.idpVerifier })
     } catch (e) {
       log({ event: 'idp-error', stage: 'exchange', error: String(e) })
       return page(c, 500, 'Sign-in failed', 'The identity provider response could not be verified.')
@@ -264,14 +292,56 @@ export function createApp(deps: AppDeps): Hono {
       return page(c, 403, 'Not allowed', `Your account does not have access to “${pending.service}”.`)
     }
 
-    const code = random()
-    pendingCodes.set(code, {
-      grant: { user, service: pending.service, clientId: pending.clientId },
-      redirectUri: pending.redirectUri,
-      codeChallenge: pending.codeChallenge,
-      expiresAt: Date.now() + CODE_TTL_MS
-    })
     log({ event: 'signin', user, service: pending.service, client: pending.clientId, binding })
+
+    // Explicit consent every time (MCP "confused deputy"): someone could send
+    // you an /authorize link they started from *their* client account. The
+    // client ID is the same for every Claude user, so consent can't be
+    // remembered per client without reopening that hole.
+    const consent: PendingConsent = {
+      grant: { user, service: pending.service, clientId: pending.clientId },
+      clientName: pending.clientName,
+      redirectUri: pending.redirectUri,
+      state: pending.state,
+      codeChallenge: pending.codeChallenge
+    }
+    const sealed = sealer.seal('consent', consent, CONSENT_TTL_MS)
+    const clientLabel = pending.clientName ?? pending.clientId
+    const host = new URL(pending.redirectUri).host
+    const button = (value: string, label: string, primary: boolean) =>
+      `<button name="decision" value="${value}" style="font:inherit;padding:.5rem 1rem;margin-right:.5rem;border-radius:6px;border:1px solid #888;${primary ? 'background:#1a7f37;color:#fff;border-color:#1a7f37' : 'background:none'}">${label}</button>`
+    return page(
+      c,
+      200,
+      `Allow ${clientLabel} to use “${pending.service}”?`,
+      `Signed in as ${identity.email}. ${clientLabel} (returning to ${host}) is asking for access to the “${pending.service}” service as you. Only allow this if you just started connecting it yourself.`,
+      `<form method="post" action="/consent"><input type="hidden" name="consent" value="${escapeHtml(sealed)}">${button('allow', 'Allow', true)}${button('deny', 'Deny', false)}</form>`
+    )
+  })
+
+  app.post('/consent', async (c) => {
+    const form = new URLSearchParams(await c.req.text())
+    const consent = sealer.open<PendingConsent>('consent', form.get('consent') ?? undefined)
+    if (!consent) return page(c, 400, 'Sign-in expired', 'This request has expired or is invalid. Start again from your MCP client.')
+    const back = (params: Record<string, string>) => {
+      const url = new URL(consent.redirectUri)
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
+      url.searchParams.set('state', consent.state)
+      return c.redirect(url.toString(), 303)
+    }
+    if (form.get('decision') !== 'allow') {
+      log({ event: 'consent-denied', user: consent.grant.user, service: consent.grant.service })
+      return back({ error: 'access_denied', error_description: 'Access was denied.', iss: cfg.issuer })
+    }
+    // Config may have changed while the page was open.
+    if (!isAllowed(cfg, consent.grant.user, consent.grant.service)) {
+      return page(c, 403, 'Not allowed', `Your account does not have access to “${consent.grant.service}”.`)
+    }
+    const code = random()
+    if (!pendingCodes.set(code, { grant: consent.grant, redirectUri: consent.redirectUri, codeChallenge: consent.codeChallenge, expiresAt: Date.now() + CODE_TTL_MS })) {
+      return page(c, 500, 'Busy', 'Too many sign-ins in progress. Try again in a minute.')
+    }
+    log({ event: 'consent', user: consent.grant.user, service: consent.grant.service, client: consent.grant.clientId })
     return back({ code, iss: cfg.issuer })
   })
 
@@ -322,9 +392,10 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/health', (c) => c.json({ ok: true }))
 
+  app.use('/:service/mcp', bodyLimit({ maxSize: MCP_BODY_LIMIT, onError: (c) => c.json({ error: 'body too large' }, 413) }))
   app.all('/:service/mcp', async (c) => {
     const service = c.req.param('service')
-    if (!cfg.services[service]) return c.notFound()
+    if (!getService(cfg, service)) return c.notFound()
     const challenge = (error?: string) =>
       `Bearer resource_metadata="${cfg.issuer}/.well-known/oauth-protected-resource/${service}/mcp"` + (error ? `, error="${error}"` : '')
 

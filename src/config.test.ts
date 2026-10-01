@@ -50,6 +50,14 @@ describe('parseConfig', () => {
 
 describe('helpers', () => {
   const cfg = parseConfig(base, env)
+  it('does not let Unicode case folding match a look-alike email (Kelvin sign)', () => {
+    const kate = parseConfig(base.replace('partner: { email: p@example.com }', 'kate: { email: kate@example.com }').replace('[ian, partner]', '[ian, kate]'), env)
+    expect('\u212Aate@example.com'.toLowerCase()).toBe('kate@example.com') // the trap
+    expect(userByEmail(kate, 'Kate@example.com')).toBe('kate')
+    expect(userByEmail(kate, '\u212Aate@example.com')).toBeUndefined()
+    expect(() => parseConfig(base.replace('p@example.com', '\u212Aate@example.com'), env)).toThrow(/ASCII/)
+  })
+
   it('maps emails to users case-insensitively', () => {
     expect(userByEmail(cfg, 'IAN@example.com')).toBe('ian')
     expect(userByEmail(cfg, 'nobody@example.com')).toBeUndefined()

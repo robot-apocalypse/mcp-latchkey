@@ -90,7 +90,7 @@ const local = (url: string) => {
 }
 
 /** Runs /authorize → IdP → /idp/callback and returns the final redirect (to Claude) or the error response. */
-async function authorize(opts: { service?: string; resource?: string; redirectUri?: string; clientId?: string; challenge: string }) {
+async function authorize(opts: { service?: string; resource?: string; redirectUri?: string; clientId?: string; challenge: string; decision?: string }) {
   const q = new URLSearchParams({
     response_type: 'code',
     client_id: opts.clientId ?? CLAUDE,
@@ -106,8 +106,21 @@ async function authorize(opts: { service?: string; resource?: string; redirectUr
   expect(toIdp.startsWith(idpServer.issuer)).toBe(true)
   const r2 = await fetch(toIdp, { redirect: 'manual' })
   const r3 = await app.request(local(r2.headers.get('location')!))
-  return { res: r3, location: r3.headers.get('location') }
+  if (r3.status !== 200) return { res: r3, location: r3.headers.get('location') }
+  // Consent page: post the sealed form back.
+  const html = await r3.text()
+  const sealed = /name="consent" value="([^"]+)"/.exec(html)?.[1]
+  expect(sealed).toBeTruthy()
+  const r4 = await consent(sealed!, opts.decision ?? 'allow')
+  return { res: r4, location: r4.headers.get('location'), consentHtml: html, sealed }
 }
+
+const consent = (sealed: string, decision: string) =>
+  app.request('/consent', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ consent: sealed, decision }).toString()
+  })
 
 async function token(params: Record<string, string>) {
   return app.request('/token', {
@@ -277,5 +290,56 @@ describe('builtin whoami', () => {
     const headers = { authorization: `Bearer ${t.access_token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
     const r = await app.request('/toggl/mcp', { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }) })
     expect(await r.text()).toContain('\\"user\\":\\"ian\\"')
+  })
+})
+
+describe('hardening', () => {
+  it('shows a consent page that cannot be framed, and deny returns access_denied', async () => {
+    const { location, consentHtml } = await authorize({ challenge: pkce().challenge, decision: 'deny' })
+    expect(consentHtml).toContain('Allow Claude to use')
+    expect(consentHtml).toContain('Signed in as ian@example.com')
+    const back = new URL(location!)
+    expect(back.searchParams.get('error')).toBe('access_denied')
+    expect(back.searchParams.get('code')).toBeNull()
+    const page = await app.request('/idp/callback?state=x')
+    expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+    expect(page.headers.get('strict-transport-security')).toBeTruthy()
+  })
+
+  it('rejects forged, tampered and cross-purpose sealed blobs', async () => {
+    const { sealed } = await authorize({ challenge: pkce().challenge, decision: 'deny' })
+    expect((await consent('garbage', 'allow')).status).toBe(400)
+    const flipped = sealed!.slice(0, -2) + (sealed!.endsWith('A') ? 'BB' : 'AA')
+    expect((await consent(flipped, 'allow')).status).toBe(400)
+    // a consent blob is not a valid IdP state
+    expect((await app.request(`/idp/callback?state=${sealed}&code=x`)).status).toBe(400)
+  })
+
+  it('caps request bodies before reading them', async () => {
+    const big = 'a'.repeat(64 * 1024)
+    const r = await app.request('/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': String(big.length) }, body: big })
+    expect(r.status).toBe(413)
+    const j = await app.request('/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'null' })
+    expect(j.status).toBe(400)
+  })
+
+  it('does not treat Object prototype names as services', async () => {
+    for (const p of ['/.well-known/oauth-protected-resource/constructor/mcp', '/.well-known/oauth-protected-resource/__proto__/mcp', '/constructor/mcp', '/toString/mcp']) {
+      expect((await app.request(p, { method: p.startsWith('/.well') ? 'GET' : 'POST' })).status).toBe(404)
+    }
+  })
+
+  it('survives a flood of /authorize without losing a real sign-in', async () => {
+    const { verifier, challenge } = pkce()
+    const q = new URLSearchParams({ response_type: 'code', client_id: CLAUDE, redirect_uri: CALLBACK, state: 'victim', code_challenge: challenge, code_challenge_method: 'S256', resource: `${ISSUER}/toggl/mcp` })
+    const victim = (await app.request(`/authorize?${q}`)).headers.get('location')!
+    for (let i = 0; i < 1500; i++) await app.request(`/authorize?${q}`)
+    const r2 = await fetch(victim, { redirect: 'manual' })
+    const r3 = await app.request(local(r2.headers.get('location')!))
+    expect(r3.status).toBe(200)
+    const sealed = /name="consent" value="([^"]+)"/.exec(await r3.text())![1]!
+    const back = new URL((await consent(sealed, 'allow')).headers.get('location')!)
+    const t = await token({ grant_type: 'authorization_code', client_id: CLAUDE, code: back.searchParams.get('code')!, code_verifier: verifier, redirect_uri: CALLBACK })
+    expect(t.status).toBe(200)
   })
 })
