@@ -247,7 +247,7 @@ describe('sign-in', () => {
 
   it('stops working as soon as config removes access', async () => {
     const t = await signIn('mealie')
-    build({ ...cfg, services: { ...cfg.services, mealie: { allow: [] } } })
+    build({ ...cfg, services: { ...cfg.services, mealie: { ...cfg.services.mealie!, allow: [] } } })
     expect((await mcp('mealie', t.access_token)).status).toBe(401)
     const r = await token({ grant_type: 'refresh_token', client_id: CLAUDE, refresh_token: t.refresh_token })
     expect(r.status).toBe(400)

@@ -38,12 +38,40 @@ const userSchema = z.strictObject({
   email: z.email().transform((e) => e.toLowerCase())
 })
 
-// Upstream definitions are consumed in Phase 2; validated loosely here so
-// configs written now keep working.
-const serviceSchema = z.looseObject({
-  allow: z.array(name).default([]),
-  builtin: z.enum(['whoami']).optional()
-})
+const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
+
+// How latchkey reaches the MCP server behind a service. Exactly one of
+// builtin / stdio / http; a service with none answers 501.
+const serviceSchema = z
+  .strictObject({
+    allow: z.array(name).default([]),
+    builtin: z.enum(['whoami']).optional(),
+    stdio: z
+      .strictObject({
+        command: z.string().min(1),
+        args: z.array(z.string()).default([]),
+        // The child gets ONLY these, PATH, HOME (= <data_dir>/<service>) and the
+        // MCP SDK's non-secret defaults (LOGNAME, SHELL, TERM, USER); never
+        // latchkey's own environment.
+        env: z.record(envName, z.string()).default({}),
+        cwd: z.string().optional()
+      })
+      .optional(),
+    http: z
+      .strictObject({
+        url: z.url(),
+        // Sent to the upstream on every request, e.g. its own API token. The
+        // caller's latchkey token is never forwarded.
+        headers: z.record(z.string(), z.string()).default({})
+      })
+      .optional(),
+    hide_tools: z.array(z.string()).default([]),
+    keepalive: z
+      .strictObject({ tool: z.string(), args: z.record(z.string(), z.unknown()).default({}), every: duration })
+      .optional(),
+    timeout: duration.default(parseDuration('5m'))
+  })
+  .refine((s) => [s.builtin, s.stdio, s.http].filter(Boolean).length <= 1, 'use only one of builtin, stdio, http')
 
 const idpSchema = z
   .strictObject({

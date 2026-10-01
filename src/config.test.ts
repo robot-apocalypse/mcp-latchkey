@@ -23,7 +23,7 @@ describe('parseConfig', () => {
     expect(cfg.oauth.access_token_ttl).toBe(3_600_000)
     expect(cfg.oauth.refresh_token_idle_ttl).toBe(90 * 86_400_000)
     expect(cfg.users.ian?.email).toBe('ian@example.com')
-    expect(cfg.services.mealie?.http).toEqual({ url: 'http://x' })
+    expect(cfg.services.mealie?.http).toEqual({ url: 'http://x', headers: {} })
   })
 
   it('fails on a missing env var, naming it', () => {
@@ -68,5 +68,17 @@ describe('helpers', () => {
   it('parses durations', () => {
     expect(parseDuration('30m')).toBe(1_800_000)
     expect(() => parseDuration('1w')).toThrow()
+  })
+})
+
+describe('service upstreams', () => {
+  const svc = (body: string) => parseConfig(base.replace('  firefly: { allow: [ian] }', body), env)
+  it('parses stdio with defaults', () => {
+    const cfg = svc('  toggl:\n    allow: [ian]\n    stdio: { command: node, env: { TOGGL_SENTRY: "off" } }\n    hide_tools: [auth]\n    keepalive: { tool: workspace, args: { action: get-context }, every: 24h }')
+    expect(cfg.services.toggl).toMatchObject({ stdio: { command: 'node', args: [], env: { TOGGL_SENTRY: 'off' } }, hide_tools: ['auth'], timeout: 300_000, keepalive: { every: 86_400_000 } })
+  })
+  it('rejects two upstream kinds at once and unknown keys', () => {
+    expect(() => svc('  x: { stdio: { command: a }, http: { url: "http://b" } }')).toThrow(/only one/)
+    expect(() => svc('  x: { stdio: { command: a, shell: true } }')).toThrow()
   })
 })

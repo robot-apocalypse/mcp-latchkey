@@ -346,7 +346,22 @@ export function createApp(deps: AppDeps): Hono {
       c.header('WWW-Authenticate', challenge('invalid_token'))
       return c.json({ error: 'invalid_token', error_description: 'access revoked' }, 401)
     }
-    return deps.mcp(service, grant, c.req.raw)
+    // Keep a copy of small bodies so a rejected request can be diagnosed.
+    const peek = c.req.method === 'POST' ? c.req.raw.clone() : undefined
+    const res = await deps.mcp(service, grant, c.req.raw)
+    if (res.status >= 400 && peek) {
+      const text = await peek.text().catch(() => '')
+      let rpc: string | undefined
+      try {
+        const j = JSON.parse(text) as { method?: string } | Array<{ method?: string }>
+        rpc = Array.isArray(j) ? j.map((m) => m.method).join(',') : j.method
+      } catch {
+        rpc = undefined
+      }
+      const detail = await res.clone().text().catch(() => '')
+      log({ event: 'mcp-rejected', service, status: res.status, rpc: rpc ?? null, protocol: c.req.header('mcp-protocol-version') ?? null, detail: detail.slice(0, 300) })
+    }
+    return res
   })
 
   app.notFound((c) => c.json({ error: 'not_found' }, 404))

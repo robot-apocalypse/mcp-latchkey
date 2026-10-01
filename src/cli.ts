@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util'
 import { serve } from '@hono/node-server'
-import { createApp, type McpHandler } from './app.js'
+import { createApp } from './app.js'
 import { builtinHandler } from './builtin.js'
+import { createUpstreams } from './upstream.js'
 import { loadConfig, serviceResource, type Config } from './config.js'
 import { createIdp } from './idp.js'
 import { Store } from './store/store.js'
@@ -22,15 +23,6 @@ Commands:
 Options:
   -c, --config <path>           config file (default: $LATCHKEY_CONFIG or ./latchkey.yaml)
 `
-
-// Phase 2 adds the stdio/HTTP upstream bridge here.
-function mcpHandler(cfg: Config): McpHandler {
-  const builtin = builtinHandler(cfg)
-  return async (service, grant, request) => {
-    if (cfg.services[service]?.builtin) return builtin(service, grant, request)
-    return Response.json({ error: 'upstream_not_configured', error_description: `service "${service}" has no upstream yet` }, { status: 501 })
-  }
-}
 
 function table(rows: string[][]): string {
   if (rows.length === 0) return ''
@@ -70,10 +62,32 @@ async function main(argv: string[]): Promise<number> {
 
   switch (cmd) {
     case 'serve': {
-      const app = createApp({ cfg, store: store(), idp: createIdp(cfg), mcp: mcpHandler(cfg) })
-      serve({ fetch: app.fetch, port: cfg.listen.port, hostname: cfg.listen.host }, (info) => {
-        console.log(JSON.stringify({ event: 'listening', address: `${info.address}:${info.port}`, issuer: cfg.issuer, services: Object.keys(cfg.services) }))
+      const log = (line: Record<string, unknown>) => console.log(JSON.stringify({ t: new Date().toISOString(), ...line }))
+      const builtin = builtinHandler(cfg)
+      const { upstreams, handler } = createUpstreams(cfg, log)
+      const app = createApp({
+        cfg,
+        store: store(),
+        idp: createIdp(cfg),
+        log,
+        mcp: (service, grant, request) => (cfg.services[service]?.builtin ? builtin(service, grant, request) : handler(service, grant, request))
       })
+      const server = serve({ fetch: app.fetch, port: cfg.listen.port, hostname: cfg.listen.host }, (info) => {
+        log({ event: 'listening', address: `${info.address}:${info.port}`, issuer: cfg.issuer, services: Object.keys(cfg.services) })
+      })
+      // Connect stdio/http upstreams up front so problems show in the logs at
+      // boot, then start their keepalives. Failures are retried on first use.
+      for (const up of upstreams.values()) {
+        up.getClient().catch(() => {})
+        up.startKeepalive()
+      }
+      const shutdown = () => {
+        log({ event: 'shutdown' })
+        server.close()
+        void Promise.all([...upstreams.values()].map((u) => u.close())).finally(() => process.exit(0))
+      }
+      process.once('SIGTERM', shutdown)
+      process.once('SIGINT', shutdown)
       return -1 // keep running
     }
 
@@ -84,7 +98,14 @@ async function main(argv: string[]): Promise<number> {
       console.log(`clients:  CIMD ${cfg.oauth.cimd_client_ids.join(', ') || '(off)'}; DCR ${cfg.oauth.dynamic_registration ? 'on' : 'off'}`)
       console.log(`redirects: ${cfg.oauth.redirect_uris.join(', ')}`)
       console.log('')
-      console.log(table([['SERVICE', 'URL', 'ALLOWED'], ...Object.entries(cfg.services).map(([s, d]) => [s, serviceResource(cfg, s), d.allow.join(', ') || '(nobody)'])]))
+      const upstreamOf = (d: Config['services'][string]) =>
+        d.builtin ? `builtin:${d.builtin}` : d.stdio ? `stdio:${d.stdio.command}` : d.http ? `http:${d.http.url}` : '(none)'
+      console.log(
+        table([
+          ['SERVICE', 'URL', 'UPSTREAM', 'ALLOWED'],
+          ...Object.entries(cfg.services).map(([s, d]) => [s, serviceResource(cfg, s), upstreamOf(d), d.allow.join(', ') || '(nobody)'])
+        ])
+      )
       return 0
     }
 
