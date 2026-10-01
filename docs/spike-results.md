@@ -41,10 +41,12 @@ authorization server work. Tokens can be scoped to a service via `resource`.
 
 ## Other observations
 
-- Every new MCP session starts with one **400** before the 200s (`POST`,
-  `Claude-User`). Likely a protocol-version or session probe that the SDK's
-  stateless transport rejects and Claude retries. Harmless here; investigate in
-  the real gateway.
+- Every new MCP session starts with one **400** before the 200s. Diagnosed in
+  the real gateway (2026-10-01): Claude first tries the 2026-07-28 protocol's
+  `server/discover` with `mcp-protocol-version: 2026-07-28`; the TypeScript SDK
+  (1.31) only supports up to 2025-11-25 and answers 400 "Unsupported protocol
+  version", and Claude falls back to `initialize`. Harmless; goes away once the
+  SDK supports 2026-07-28.
 - The `/token` call comes from Claude's backend, the `/authorize` call from the
   user's browser: CORS on `/authorize` is irrelevant, the redirect is what matters.
 - A fresh public Funnel hostname is scanned within minutes: `.env`, `.git/config`,

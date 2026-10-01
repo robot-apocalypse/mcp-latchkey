@@ -82,8 +82,9 @@ Verified against claude.ai in `spike-results.md`.
 - **Audit log:** one line per tool call (user, service, tool, outcome,
   duration); no arguments or results.
 - **Health:** `/health` reports each upstream's state.
-- Investigate the one 400 Claude gets at the start of each MCP session
-  (`spike-results.md`) before shipping.
+- The 400 at the start of each session is Claude probing protocol 2026-07-28
+  (`server/discover`) before falling back; see `spike-results.md`. Bump the SDK
+  when it supports that version.
 
 ### Deployment (Phase 3+)
 
