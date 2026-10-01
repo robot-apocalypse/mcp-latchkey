@@ -107,8 +107,15 @@ Verified against claude.ai in `spike-results.md`.
 - **Tools only.** Server-to-client features (notifications, progress, sampling,
   elicitation) are not forwarded through the bridge.
 - **Config reload needs a restart** (or SIGHUP, later).
-- **CLI vs server write race:** a revoke written at the same moment the server
-  persists can be overwritten; re-run the revoke if it coincides with activity.
-- **Pending sign-ins are bounded (1000) in memory:** flooding `/authorize` can
-  evict someone's in-progress sign-in (they retry). Restart drops pending
-  sign-ins.
+- **Consent is asked on every connect.** It can't be remembered per client:
+  every Claude user shares one client ID, so a remembered consent would let an
+  attacker-started sign-in through.
+
+## Security review
+
+A penetration test on 2026-10-01 (white-box audit plus black-box tests against
+a local and the live instance) found no way to obtain or misuse tokens. Fixed
+as a result: stdio isolation (`latchkey bridge`), body limits, consent page,
+sealed sign-in state (no server-side table to flood), locked state writes (a
+CLI revoke can no longer be lost), own-key config lookups, ASCII-only email
+matching, generic upstream errors and security headers.
