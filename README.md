@@ -37,6 +37,13 @@ node dist/cli.js serve
 Register `<issuer>/idp/callback` as an authorized redirect URI with your OIDC provider. In
 Claude.ai, add a custom connector per service: `<issuer>/<service>/mcp`.
 
+To check sign-in before wiring up a real server, add a service with `builtin: whoami` and
+connect to it; its one tool reports the user and service you are signed in as.
+
+On a brand-new hostname, wait a few minutes before connecting: if some of Claude's servers
+can't resolve it yet, the first attempt fails with "Couldn't register with … sign-in service".
+Retrying works once DNS has propagated.
+
 ## CLI
 
 In the Docker image the CLI is on the path as `latchkey`; from a checkout use `node dist/cli.js`.
