@@ -27,6 +27,9 @@ interface State {
 
 export interface IssuedTokens { accessToken: string; refreshToken: string; expiresIn: number }
 
+const MAX_CLIENTS = 100
+const UNUSED_CLIENT_TTL_MS = 24 * 60 * 60 * 1000
+
 const emptyState = (): State => ({ version: 1, identities: {}, clients: {}, refreshTokens: {}, accessTokens: {} })
 
 export const hashToken = (t: string): string => crypto.createHash('sha256').update(t).digest('hex')
@@ -121,8 +124,25 @@ export class Store {
 
   // ---- dynamically registered clients ------------------------------------
 
+  /**
+   * Registration is unauthenticated, so the client list must not grow without
+   * bound: clients that never obtained a grant are dropped after a day, and
+   * the total is capped (oldest unused first).
+   */
   async registerClient(redirectUris: string[], name?: string): Promise<string> {
     this.refresh_()
+    const used = new Set(Object.values(this.state.refreshTokens).map((r) => r.clientId))
+    const now = Date.now()
+    for (const [id, c] of Object.entries(this.state.clients)) {
+      if (!used.has(id) && c.createdAt + UNUSED_CLIENT_TTL_MS < now) delete this.state.clients[id]
+    }
+    const unused = Object.entries(this.state.clients)
+      .filter(([id]) => !used.has(id))
+      .sort(([, a], [, b]) => a.createdAt - b.createdAt)
+    while (Object.keys(this.state.clients).length >= MAX_CLIENTS && unused.length > 0) {
+      delete this.state.clients[unused.shift()![0]]
+    }
+    if (Object.keys(this.state.clients).length >= MAX_CLIENTS) throw new Error('too many registered clients')
     const id = crypto.randomUUID()
     this.state.clients[id] = { redirectUris, name, createdAt: Date.now() }
     await this.persist()
@@ -169,12 +189,12 @@ export class Store {
    * client) but expire after `idleTtlMs` without use. The refresh must come
    * from the same client and be for the same service it was issued for.
    */
-  async refresh(refreshToken: string, clientId: string, service: string | undefined, accessTtlMs: number, idleTtlMs: number): Promise<{ tokens: IssuedTokens; grant: Grant } | null> {
+  async refresh(refreshToken: string, clientId: string | undefined, service: string | undefined, accessTtlMs: number, idleTtlMs: number): Promise<{ tokens: IssuedTokens; grant: Grant } | null> {
     this.refresh_()
     this.prune(idleTtlMs)
     const refreshId = hashToken(refreshToken)
     const rec = this.state.refreshTokens[refreshId]
-    if (!rec || rec.clientId !== clientId) return null
+    if (!rec || (clientId !== undefined && rec.clientId !== clientId)) return null
     if (service !== undefined && rec.service !== service) return null
     rec.lastUsedAt = Date.now()
     const grant: Grant = { user: rec.user, service: rec.service, clientId: rec.clientId }

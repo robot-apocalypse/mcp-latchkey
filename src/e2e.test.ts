@@ -140,7 +140,9 @@ const mcp = (service: string, tok?: string) => app.request(`/${service}/mcp`, { 
 describe('discovery', () => {
   it('advertises CIMD, DCR and per-service protected resources', async () => {
     const as = await (await app.request('/.well-known/oauth-authorization-server')).json()
-    expect(as).toMatchObject({ issuer: ISSUER, client_id_metadata_document_supported: true, registration_endpoint: `${ISSUER}/register` })
+    expect(as).toMatchObject({ issuer: ISSUER, client_id_metadata_document_supported: true })
+    expect(as).not.toHaveProperty('registration_endpoint')
+    expect((await app.request('/register', { method: 'POST', body: '{}' })).status).toBe(400)
     const prm = await (await app.request('/.well-known/oauth-protected-resource/toggl/mcp')).json()
     expect(prm).toMatchObject({ resource: `${ISSUER}/toggl/mcp`, authorization_servers: [ISSUER] })
     expect((await app.request('/.well-known/oauth-protected-resource')).status).toBe(404)
@@ -183,6 +185,19 @@ describe('sign-in', () => {
     const fresh = (await ok.json()) as { access_token: string; refresh_token: string }
     expect(fresh.refresh_token).toBe(t.refresh_token)
     expect((await mcp('toggl', fresh.access_token)).status).toBe(200)
+  })
+
+  it('accepts a refresh without client_id, but not with the wrong one', async () => {
+    const t = await signIn('toggl')
+    expect((await token({ grant_type: 'refresh_token', refresh_token: t.refresh_token })).status).toBe(200)
+    expect((await token({ grant_type: 'refresh_token', client_id: 'someone-else', refresh_token: t.refresh_token })).status).toBe(400)
+  })
+
+  it('requires client_id when redeeming a code', async () => {
+    const { verifier, challenge } = pkce()
+    const { location } = await authorize({ challenge })
+    const code = new URL(location!).searchParams.get('code')!
+    expect((await token({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: CALLBACK })).status).toBe(401)
   })
 
   it('refuses a user without access to the service', async () => {
@@ -240,6 +255,8 @@ describe('sign-in', () => {
 })
 
 describe('dynamic client registration', () => {
+  beforeEach(() => build(makeConfig('oauth: { dynamic_registration: true }')))
+
   it('registers only allowlisted redirect URIs and the client can sign in', async () => {
     const bad = await app.request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['https://evil.example/cb'] }) })
     expect(bad.status).toBe(400)

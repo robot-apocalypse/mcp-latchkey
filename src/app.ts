@@ -155,7 +155,12 @@ export function createApp(deps: AppDeps): Hono {
       return c.json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be allowlisted callback URLs' }, 400)
     }
     const name = typeof body.client_name === 'string' ? body.client_name.slice(0, 100) : undefined
-    const clientId = await store.registerClient(uris as string[], name)
+    let clientId: string
+    try {
+      clientId = await store.registerClient(uris as string[], name)
+    } catch {
+      return c.json({ error: 'temporarily_unavailable', error_description: 'too many registered clients' }, 503)
+    }
     return c.json(
       {
         client_id: clientId,
@@ -279,12 +284,12 @@ export function createApp(deps: AppDeps): Hono {
     const err = (error: string, description?: string, status: 400 | 401 = 400) =>
       c.json({ error, ...(description ? { error_description: description } : {}) }, status)
 
-    if (!body.client_id) return err('invalid_client', 'client_id is required', 401)
     // A resource, if given, must name a configured service.
     const requested = body.resource !== undefined ? serviceForResource(cfg, body.resource) : undefined
     if (body.resource !== undefined && !requested) return err('invalid_target')
 
     if (body.grant_type === 'authorization_code') {
+      if (!body.client_id) return err('invalid_client', 'client_id is required', 401)
       const pending = body.code ? pendingCodes.take(body.code) : undefined
       if (!pending) return err('invalid_grant', 'unknown or expired code')
       if (pending.grant.clientId !== body.client_id) return err('invalid_grant', 'code was issued to another client')
@@ -299,7 +304,8 @@ export function createApp(deps: AppDeps): Hono {
 
     if (body.grant_type === 'refresh_token') {
       if (!body.refresh_token) return err('invalid_request')
-      const r = await store.refresh(body.refresh_token, body.client_id, requested, ttl, idle)
+      // Public clients may omit client_id on refresh; if present it must match.
+      const r = await store.refresh(body.refresh_token, body.client_id || undefined, requested, ttl, idle)
       if (!r) return err('invalid_grant')
       if (!isAllowed(cfg, r.grant.user, r.grant.service)) {
         await store.revoke({ user: r.grant.user, service: r.grant.service })

@@ -29,14 +29,17 @@ claude.ai ─▶ https://mcp.example/<service>/mcp ─▶ latchkey ─▶ your M
 ```bash
 cp latchkey.example.yaml latchkey.yaml   # edit issuer, users, services
 export LATCHKEY_ENCRYPTION_KEY=$(openssl rand -base64 48) GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=...
-npx latchkey check-config
-npx latchkey serve
+npm ci && npm run build
+node dist/cli.js check-config
+node dist/cli.js serve
 ```
 
 Register `<issuer>/idp/callback` as an authorized redirect URI with your OIDC provider. In
 Claude.ai, add a custom connector per service: `<issuer>/<service>/mcp`.
 
 ## CLI
+
+In the Docker image the CLI is on the path as `latchkey`; from a checkout use `node dist/cli.js`.
 
 ```
 latchkey check-config                         validate config, list services and who may use them

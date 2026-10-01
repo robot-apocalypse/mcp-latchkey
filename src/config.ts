@@ -80,7 +80,7 @@ const configSchema = z
       .strictObject({
         redirect_uris: z.array(httpsUrl).min(1).default(CLAUDE_REDIRECT_URIS),
         cimd_client_ids: z.array(httpsUrl).default(CLAUDE_CIMD_CLIENT_IDS),
-        dynamic_registration: z.boolean().default(true),
+        dynamic_registration: z.boolean().default(false),
         access_token_ttl: duration.default(parseDuration('1h')),
         refresh_token_idle_ttl: duration.default(parseDuration('90d'))
       })

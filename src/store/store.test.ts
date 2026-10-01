@@ -107,4 +107,18 @@ describe('Store', () => {
     expect(await s.unbindIdentity('ian')).toBe(true)
     expect(await s.bindIdentity('ian', 'https://accounts.google.com', '999')).toBe('bound')
   })
+
+  it('caps registered clients and prunes ones that never got a grant', async () => {
+    vi.useFakeTimers({ now: 1_000_000, toFake: ['Date'] })
+    const s = new Store(dir, KEY)
+    const kept = await s.registerClient(['https://claude.ai/api/mcp/auth_callback'])
+    await s.issue({ ...grant, clientId: kept }, HOUR, 90 * DAY)
+    for (let i = 0; i < 150; i++) await s.registerClient(['https://claude.ai/api/mcp/auth_callback'])
+    // capped at 100, and the client with a live grant survived
+    expect(s.getClient(kept)).toBeDefined()
+    vi.setSystemTime(1_000_000 + 2 * DAY)
+    const fresh = await s.registerClient(['https://claude.ai/api/mcp/auth_callback'])
+    expect(s.getClient(fresh)).toBeDefined()
+    expect(s.getClient(kept)).toBeDefined()
+  })
 })

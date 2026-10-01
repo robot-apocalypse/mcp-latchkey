@@ -12,6 +12,7 @@ const cfg = parseConfig(
 issuer: https://mcp.example
 encryption_key: ${'k'.repeat(32)}
 idp: { issuer: https://idp.example, client_id: a, client_secret: b }
+oauth: { dynamic_registration: true }
 users: {}
 services: {}
 `,
@@ -60,5 +61,8 @@ describe('resolveClient (DCR)', () => {
     expect((await resolveClient(cfg, store, id)).redirectUris).toEqual(['https://claude.ai/api/mcp/auth_callback'])
     await expect(resolveClient(cfg, store, 'nope')).rejects.toThrow(/unknown/)
     await expect(resolveClient(cfg, store, undefined)).rejects.toThrow(/required/)
+    // registered clients are refused once DCR is turned off
+    const off = { ...cfg, oauth: { ...cfg.oauth, dynamic_registration: false } }
+    await expect(resolveClient(off, store, id)).rejects.toThrow(/unknown/)
   })
 })

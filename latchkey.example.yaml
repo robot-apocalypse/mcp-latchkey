@@ -28,7 +28,7 @@ idp:
 #     - https://claude.com/api/mcp/auth_callback
 #   cimd_client_ids:               # client metadata URLs latchkey may fetch
 #     - https://claude.ai/oauth/mcp-oauth-client-metadata
-#   dynamic_registration: true     # POST /register for other clients
+#   dynamic_registration: false    # POST /register for non-CIMD clients
 #   access_token_ttl: 1h
 #   refresh_token_idle_ttl: 90d    # unused this long → sign in again
 
