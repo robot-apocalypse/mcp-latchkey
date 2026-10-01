@@ -1,0 +1,7 @@
+node_modules
+dist
+data
+spike
+.git
+*.md
+!README.md

@@ -1,0 +1,33 @@
+{
+  "name": "mcp-latchkey",
+  "version": "0.1.0",
+  "description": "Per-person, per-service sign-in for your self-hosted MCP servers, built for Claude.ai and any OIDC provider.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "latchkey": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/cli.js serve"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.3",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "hono": "^4.13.12",
+    "jose": "^6.2.12",
+    "openid-client": "^6.8.8",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "~5.9",
+    "vitest": "^5.0.3"
+  }
+}
