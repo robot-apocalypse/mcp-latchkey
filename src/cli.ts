@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util'
 import { serve } from '@hono/node-server'
 import { createApp, type McpHandler } from './app.js'
+import { builtinHandler } from './builtin.js'
 import { loadConfig, serviceResource, type Config } from './config.js'
 import { createIdp } from './idp.js'
 import { Store } from './store/store.js'
@@ -22,9 +23,14 @@ Options:
   -c, --config <path>           config file (default: $LATCHKEY_CONFIG or ./latchkey.yaml)
 `
 
-// Phase 2 replaces this with the upstream bridge.
-const notYetBridged: McpHandler = async (service) =>
-  Response.json({ error: 'upstream_not_configured', error_description: `service "${service}" has no upstream yet` }, { status: 501 })
+// Phase 2 adds the stdio/HTTP upstream bridge here.
+function mcpHandler(cfg: Config): McpHandler {
+  const builtin = builtinHandler(cfg)
+  return async (service, grant, request) => {
+    if (cfg.services[service]?.builtin) return builtin(service, grant, request)
+    return Response.json({ error: 'upstream_not_configured', error_description: `service "${service}" has no upstream yet` }, { status: 501 })
+  }
+}
 
 function table(rows: string[][]): string {
   if (rows.length === 0) return ''
@@ -64,7 +70,7 @@ async function main(argv: string[]): Promise<number> {
 
   switch (cmd) {
     case 'serve': {
-      const app = createApp({ cfg, store: store(), idp: createIdp(cfg), mcp: notYetBridged })
+      const app = createApp({ cfg, store: store(), idp: createIdp(cfg), mcp: mcpHandler(cfg) })
       serve({ fetch: app.fetch, port: cfg.listen.port, hostname: cfg.listen.host }, (info) => {
         console.log(JSON.stringify({ event: 'listening', address: `${info.address}:${info.port}`, issuer: cfg.issuer, services: Object.keys(cfg.services) }))
       })

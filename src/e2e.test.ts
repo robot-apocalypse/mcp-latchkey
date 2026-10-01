@@ -267,3 +267,15 @@ describe('dynamic client registration', () => {
     expect(new URL(location!).searchParams.get('code')).toBeTruthy()
   })
 })
+
+describe('builtin whoami', () => {
+  it('reports the signed-in user over real MCP', async () => {
+    const { builtinHandler } = await import('./builtin.js')
+    build(makeConfig())
+    app = createApp({ cfg, store, idp: createIdp(cfg, { allowInsecure: true }), fetchImpl: fakeFetch, log: () => {}, mcp: builtinHandler(cfg) })
+    const t = await signIn('toggl')
+    const headers = { authorization: `Bearer ${t.access_token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+    const r = await app.request('/toggl/mcp', { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }) })
+    expect(await r.text()).toContain('\\"user\\":\\"ian\\"')
+  })
+})

@@ -41,7 +41,8 @@ const userSchema = z.strictObject({
 // Upstream definitions are consumed in Phase 2; validated loosely here so
 // configs written now keep working.
 const serviceSchema = z.looseObject({
-  allow: z.array(name).default([])
+  allow: z.array(name).default([]),
+  builtin: z.enum(['whoami']).optional()
 })
 
 const idpSchema = z
