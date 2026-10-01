@@ -206,7 +206,8 @@ export function createUpstreams(cfg: Config, log: Log): { upstreams: Map<string,
         return r
       } catch (e) {
         log({ event: 'tool', user: grant.user, service, tool: req.params.name, ok: false, ms: Date.now() - started, error: String(e).slice(0, 300) })
-        return { content: [{ type: 'text', text: `Upstream error: ${String(e)}` }], isError: true }
+        // Details go to the log, not to the client.
+        return { content: [{ type: 'text', text: `The ${service} service failed to handle this call.` }], isError: true }
       }
     })
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined })

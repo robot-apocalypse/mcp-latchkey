@@ -110,7 +110,7 @@ Config changes take effect on restart: `docker compose restart latchkey`.
 latchkey users                          # who can use what, and bound accounts
 latchkey tokens list                    # active grants
 latchkey tokens revoke --user alex      # sign someone out everywhere
-latchkey users unbind alex              # let alex sign in with a different account
+latchkey users unbind alex              # let alex sign in with a different account (revokes their tokens)
 ```
 
 Removing a user from a service's `allow` list takes effect on their next

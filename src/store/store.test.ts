@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Store } from './store.js'
 
@@ -120,5 +122,30 @@ describe('Store', () => {
     const fresh = await s.registerClient(['https://claude.ai/api/mcp/auth_callback'])
     expect(s.getClient(fresh)).toBeDefined()
     expect(s.getClient(kept)).toBeDefined()
+  })
+
+  it('a revoke from another process during a server refresh sticks (no lost update)', async () => {
+    // Reproduces the pentest finding: the CLI process runs while the server's
+    // refresh write is in flight; previously the server's write landed last
+    // and resurrected the revoked grant.
+    const server = new Store(dir, KEY)
+    const t = await server.issue(grant, HOUR, DAY)
+    const pending = server.refresh(t.refreshToken, undefined, 'toggl', HOUR, DAY)
+    const storeTs = path.join(path.dirname(fileURLToPath(import.meta.url)), 'store.ts')
+    const out = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+      `import { Store } from ${JSON.stringify(storeTs)}; console.log(await new Store(${JSON.stringify(dir)}, ${JSON.stringify(KEY)}).revoke({ user: 'ian' }))`
+    ]).toString().trim()
+    await pending.catch(() => null)
+    expect(out).toBe('1')
+    expect(server.validateAccess(t.accessToken)).toBeNull()
+    expect(new Store(dir, KEY).listGrants()).toEqual([])
+  })
+
+  it('recovers from a stale lock file left by a crashed process', async () => {
+    const s = new Store(dir, KEY)
+    fs.writeFileSync(path.join(dir, 'state.json.enc.lock'), '999999')
+    const old = new Date(Date.now() - 60_000)
+    fs.utimesSync(path.join(dir, 'state.json.enc.lock'), old, old)
+    await expect(s.issue(grant, HOUR, DAY)).resolves.toBeTruthy()
   })
 })

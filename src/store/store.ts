@@ -7,9 +7,10 @@ import { atomicWrite } from './atomicWrite.js'
 // Tokens are stored only as SHA-256 hashes, so a leaked state file plus key
 // still does not yield usable bearer tokens.
 //
-// The server and the `latchkey` CLI can both write this file. Every operation
-// first re-reads it if it changed on disk, so a CLI revoke takes effect on the
-// server's next request instead of being overwritten by its in-memory copy.
+// The server and the `latchkey` CLI both write this file. Every change runs as
+// lock → reload from disk → mutate → write → unlock (an O_EXCL lock file plus an
+// in-process queue), so neither can overwrite the other's change; reads reload
+// whenever the file changed on disk.
 
 export interface Identity { iss: string; sub: string; boundAt: number }
 export interface Client { redirectUris: string[]; name?: string; createdAt: number }
@@ -27,6 +28,8 @@ interface State {
 
 export interface IssuedTokens { accessToken: string; refreshToken: string; expiresIn: number }
 
+const LOCK_TIMEOUT_MS = 10_000
+const LOCK_STALE_MS = 30_000
 const MAX_CLIENTS = 100
 const UNUSED_CLIENT_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -38,16 +41,16 @@ const newToken = (): string => crypto.randomBytes(32).toString('base64url')
 export class Store {
   private state: State = emptyState()
   private fileStamp = ''
-  // While our own writes are queued, the file lags memory; reloading then would
-  // drop mutations (e.g. a just-issued token) that are not yet on disk.
-  private pendingWrites = 0
+  private chain: Promise<unknown> = Promise.resolve()
   private readonly key: Buffer
   readonly file: string
+  private readonly lockFile: string
 
   constructor(dataDir: string, secret: string) {
     this.file = path.join(dataDir, 'state.json.enc')
+    this.lockFile = `${this.file}.lock`
     this.key = crypto.scryptSync(secret, 'mcp-latchkey/state/v1', 32)
-    this.refresh_()
+    this.load()
   }
 
   // ---- persistence -------------------------------------------------------
@@ -55,17 +58,16 @@ export class Store {
   private stamp(): string {
     try {
       const s = fs.statSync(this.file)
-      return `${s.mtimeMs}:${s.size}`
+      return `${s.mtimeMs}:${s.size}:${s.ino}`
     } catch {
       return 'missing'
     }
   }
 
-  /** Reloads from disk if another process changed the file. */
-  private refresh_(): void {
-    if (this.pendingWrites > 0) return
+  /** Reloads from disk if the file changed (or always, with force). */
+  private load(force = false): void {
     const stamp = this.stamp()
-    if (stamp === this.fileStamp) return
+    if (!force && stamp === this.fileStamp) return
     this.fileStamp = stamp
     if (stamp === 'missing') {
       this.state = emptyState()
@@ -79,18 +81,53 @@ export class Store {
     this.state = { ...emptyState(), ...(JSON.parse(plain.toString('utf8')) as State) }
   }
 
-  private async persist(): Promise<void> {
+  private async write(): Promise<void> {
     const iv = crypto.randomBytes(12)
     const cipher = crypto.createCipheriv('aes-256-gcm', this.key, iv)
     const data = Buffer.concat([cipher.update(JSON.stringify(this.state), 'utf8'), cipher.final()])
     const box = { iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') }
-    this.pendingWrites++
-    try {
-      await atomicWrite(this.file, JSON.stringify(box))
-    } finally {
-      this.pendingWrites--
-      if (this.pendingWrites === 0) this.fileStamp = this.stamp()
+    await atomicWrite(this.file, JSON.stringify(box))
+    this.fileStamp = this.stamp()
+  }
+
+  private async lock(): Promise<() => void> {
+    fs.mkdirSync(path.dirname(this.lockFile), { recursive: true })
+    const deadline = Date.now() + LOCK_TIMEOUT_MS
+    for (;;) {
+      try {
+        const fd = fs.openSync(this.lockFile, 'wx', 0o600)
+        fs.writeSync(fd, String(process.pid))
+        fs.closeSync(fd)
+        return () => fs.rmSync(this.lockFile, { force: true })
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+        // A crashed holder must not wedge the store forever.
+        try {
+          if (Date.now() - fs.statSync(this.lockFile).mtimeMs > LOCK_STALE_MS) fs.rmSync(this.lockFile, { force: true })
+        } catch {
+          // removed meanwhile
+        }
+        if (Date.now() > deadline) throw new Error(`state file is locked (${this.lockFile})`)
+        await new Promise((r) => setTimeout(r, 15))
+      }
     }
+  }
+
+  /** The only way state changes. `fn` returns [result, changed]. */
+  private mutate<T>(fn: () => [T, boolean]): Promise<T> {
+    const run = this.chain.then(async () => {
+      const unlock = await this.lock()
+      try {
+        this.load(true)
+        const [result, changed] = fn()
+        if (changed) await this.write()
+        return result
+      } finally {
+        unlock()
+      }
+    })
+    this.chain = run.catch(() => {})
+    return run
   }
 
   // ---- identities --------------------------------------------------------
@@ -100,26 +137,26 @@ export class Store {
    * Later sign-ins must present the same (iss, sub); a reused or changed email
    * pointing at a different account is refused.
    */
-  async bindIdentity(user: string, iss: string, sub: string): Promise<'bound' | 'match' | 'mismatch'> {
-    this.refresh_()
-    const existing = this.state.identities[user]
-    if (existing) return existing.iss === iss && existing.sub === sub ? 'match' : 'mismatch'
-    this.state.identities[user] = { iss, sub, boundAt: Date.now() }
-    await this.persist()
-    return 'bound'
+  bindIdentity(user: string, iss: string, sub: string): Promise<'bound' | 'match' | 'mismatch'> {
+    return this.mutate(() => {
+      const existing = own(this.state.identities, user)
+      if (existing) return [existing.iss === iss && existing.sub === sub ? 'match' : 'mismatch', false]
+      this.state.identities[user] = { iss, sub, boundAt: Date.now() }
+      return ['bound', true]
+    })
   }
 
   identities(): Record<string, Identity> {
-    this.refresh_()
+    this.load()
     return { ...this.state.identities }
   }
 
-  async unbindIdentity(user: string): Promise<boolean> {
-    this.refresh_()
-    if (!this.state.identities[user]) return false
-    delete this.state.identities[user]
-    await this.persist()
-    return true
+  unbindIdentity(user: string): Promise<boolean> {
+    return this.mutate(() => {
+      if (!own(this.state.identities, user)) return [false, false]
+      delete this.state.identities[user]
+      return [true, true]
+    })
   }
 
   // ---- dynamically registered clients ------------------------------------
@@ -129,29 +166,29 @@ export class Store {
    * bound: clients that never obtained a grant are dropped after a day, and
    * the total is capped (oldest unused first).
    */
-  async registerClient(redirectUris: string[], name?: string): Promise<string> {
-    this.refresh_()
-    const used = new Set(Object.values(this.state.refreshTokens).map((r) => r.clientId))
-    const now = Date.now()
-    for (const [id, c] of Object.entries(this.state.clients)) {
-      if (!used.has(id) && c.createdAt + UNUSED_CLIENT_TTL_MS < now) delete this.state.clients[id]
-    }
-    const unused = Object.entries(this.state.clients)
-      .filter(([id]) => !used.has(id))
-      .sort(([, a], [, b]) => a.createdAt - b.createdAt)
-    while (Object.keys(this.state.clients).length >= MAX_CLIENTS && unused.length > 0) {
-      delete this.state.clients[unused.shift()![0]]
-    }
-    if (Object.keys(this.state.clients).length >= MAX_CLIENTS) throw new Error('too many registered clients')
-    const id = crypto.randomUUID()
-    this.state.clients[id] = { redirectUris, name, createdAt: Date.now() }
-    await this.persist()
-    return id
+  registerClient(redirectUris: string[], name?: string): Promise<string> {
+    return this.mutate(() => {
+      const used = new Set(Object.values(this.state.refreshTokens).map((r) => r.clientId))
+      const now = Date.now()
+      for (const [id, c] of Object.entries(this.state.clients)) {
+        if (!used.has(id) && c.createdAt + UNUSED_CLIENT_TTL_MS < now) delete this.state.clients[id]
+      }
+      const unused = Object.entries(this.state.clients)
+        .filter(([id]) => !used.has(id))
+        .sort(([, a], [, b]) => a.createdAt - b.createdAt)
+      while (Object.keys(this.state.clients).length >= MAX_CLIENTS && unused.length > 0) {
+        delete this.state.clients[unused.shift()![0]]
+      }
+      if (Object.keys(this.state.clients).length >= MAX_CLIENTS) throw new Error('too many registered clients')
+      const id = crypto.randomUUID()
+      this.state.clients[id] = { redirectUris, name, createdAt: now }
+      return [id, true]
+    })
   }
 
   getClient(id: string): Client | undefined {
-    this.refresh_()
-    return this.state.clients[id]
+    this.load()
+    return own(this.state.clients, id)
   }
 
   // ---- tokens ------------------------------------------------------------
@@ -159,7 +196,7 @@ export class Store {
   private prune(idleTtlMs: number): void {
     const now = Date.now()
     for (const [h, a] of Object.entries(this.state.accessTokens)) {
-      if (a.expiresAt < now || !this.state.refreshTokens[a.refreshId]) delete this.state.accessTokens[h]
+      if (a.expiresAt < now || !own(this.state.refreshTokens, a.refreshId)) delete this.state.accessTokens[h]
     }
     for (const [h, r] of Object.entries(this.state.refreshTokens)) {
       if (r.lastUsedAt + idleTtlMs < now) delete this.state.refreshTokens[h]
@@ -172,16 +209,16 @@ export class Store {
     return access
   }
 
-  async issue(grant: Grant, accessTtlMs: number, idleTtlMs: number): Promise<IssuedTokens> {
-    this.refresh_()
-    this.prune(idleTtlMs)
-    const refresh = newToken()
-    const refreshId = hashToken(refresh)
-    const now = Date.now()
-    this.state.refreshTokens[refreshId] = { ...grant, createdAt: now, lastUsedAt: now }
-    const access = this.mintAccess(refreshId, grant, accessTtlMs)
-    await this.persist()
-    return { accessToken: access, refreshToken: refresh, expiresIn: Math.floor(accessTtlMs / 1000) }
+  issue(grant: Grant, accessTtlMs: number, idleTtlMs: number): Promise<IssuedTokens> {
+    return this.mutate(() => {
+      this.prune(idleTtlMs)
+      const refresh = newToken()
+      const refreshId = hashToken(refresh)
+      const now = Date.now()
+      this.state.refreshTokens[refreshId] = { ...grant, createdAt: now, lastUsedAt: now }
+      const access = this.mintAccess(refreshId, grant, accessTtlMs)
+      return [{ accessToken: access, refreshToken: refresh, expiresIn: Math.floor(accessTtlMs / 1000) }, true]
+    })
   }
 
   /**
@@ -189,49 +226,53 @@ export class Store {
    * client) but expire after `idleTtlMs` without use. The refresh must come
    * from the same client and be for the same service it was issued for.
    */
-  async refresh(refreshToken: string, clientId: string | undefined, service: string | undefined, accessTtlMs: number, idleTtlMs: number): Promise<{ tokens: IssuedTokens; grant: Grant } | null> {
-    this.refresh_()
-    this.prune(idleTtlMs)
-    const refreshId = hashToken(refreshToken)
-    const rec = this.state.refreshTokens[refreshId]
-    if (!rec || (clientId !== undefined && rec.clientId !== clientId)) return null
-    if (service !== undefined && rec.service !== service) return null
-    rec.lastUsedAt = Date.now()
-    const grant: Grant = { user: rec.user, service: rec.service, clientId: rec.clientId }
-    const access = this.mintAccess(refreshId, grant, accessTtlMs)
-    await this.persist()
-    return { tokens: { accessToken: access, refreshToken, expiresIn: Math.floor(accessTtlMs / 1000) }, grant }
+  refresh(refreshToken: string, clientId: string | undefined, service: string | undefined, accessTtlMs: number, idleTtlMs: number): Promise<{ tokens: IssuedTokens; grant: Grant } | null> {
+    return this.mutate(() => {
+      this.prune(idleTtlMs)
+      const refreshId = hashToken(refreshToken)
+      const rec = own(this.state.refreshTokens, refreshId)
+      if (!rec || (clientId !== undefined && rec.clientId !== clientId)) return [null, false]
+      if (service !== undefined && rec.service !== service) return [null, false]
+      rec.lastUsedAt = Date.now()
+      const grant: Grant = { user: rec.user, service: rec.service, clientId: rec.clientId }
+      const access = this.mintAccess(refreshId, grant, accessTtlMs)
+      return [{ tokens: { accessToken: access, refreshToken, expiresIn: Math.floor(accessTtlMs / 1000) }, grant }, true]
+    })
   }
 
   /** Returns the grant behind a live access token, or null. Never writes. */
   validateAccess(token: string): Grant | null {
-    this.refresh_()
-    const rec = this.state.accessTokens[hashToken(token)]
-    if (!rec || rec.expiresAt < Date.now() || !this.state.refreshTokens[rec.refreshId]) return null
+    this.load()
+    const rec = own(this.state.accessTokens, hashToken(token))
+    if (!rec || rec.expiresAt < Date.now() || !own(this.state.refreshTokens, rec.refreshId)) return null
     return { user: rec.user, service: rec.service, clientId: rec.clientId }
   }
 
   listGrants(): Array<RefreshRecord & { id: string }> {
-    this.refresh_()
+    this.load()
     return Object.entries(this.state.refreshTokens).map(([h, r]) => ({ id: h.slice(0, 12), ...r }))
   }
 
   /** Revokes refresh tokens (and their access tokens) matching every given filter. */
-  async revoke(filter: { id?: string; user?: string; service?: string }): Promise<number> {
-    this.refresh_()
-    if (!filter.id && !filter.user && !filter.service) throw new Error('revoke needs at least one filter')
-    let n = 0
-    for (const [h, r] of Object.entries(this.state.refreshTokens)) {
-      if (filter.id && !h.startsWith(filter.id)) continue
-      if (filter.user && r.user !== filter.user) continue
-      if (filter.service && r.service !== filter.service) continue
-      delete this.state.refreshTokens[h]
-      n++
-    }
-    for (const [h, a] of Object.entries(this.state.accessTokens)) {
-      if (!this.state.refreshTokens[a.refreshId]) delete this.state.accessTokens[h]
-    }
-    if (n > 0) await this.persist()
-    return n
+  revoke(filter: { id?: string; user?: string; service?: string }): Promise<number> {
+    if (!filter.id && !filter.user && !filter.service) return Promise.reject(new Error('revoke needs at least one filter'))
+    return this.mutate(() => {
+      let n = 0
+      for (const [h, r] of Object.entries(this.state.refreshTokens)) {
+        if (filter.id && !h.startsWith(filter.id)) continue
+        if (filter.user && r.user !== filter.user) continue
+        if (filter.service && r.service !== filter.service) continue
+        delete this.state.refreshTokens[h]
+        n++
+      }
+      for (const [h, a] of Object.entries(this.state.accessTokens)) {
+        if (!own(this.state.refreshTokens, a.refreshId)) delete this.state.accessTokens[h]
+      }
+      return [n, n > 0]
+    })
   }
+}
+
+function own<T>(rec: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(rec, key) ? rec[key] : undefined
 }

@@ -18,7 +18,7 @@ Commands:
   tokens list [--user U] [--service S]
   tokens revoke (--id ID | --user U | --service S)...
   users                         list users, their access and bound IdP accounts
-  users unbind <user>           forget a user's bound IdP account (next sign-in rebinds)
+  users unbind <user>           forget a user's bound IdP account and revoke their tokens
 
 Options:
   -c, --config <path>           config file (default: $LATCHKEY_CONFIG or ./latchkey.yaml)
@@ -139,7 +139,10 @@ async function main(argv: string[]): Promise<number> {
           console.error('usage: latchkey users unbind <user>')
           return 1
         }
-        console.log((await s.unbindIdentity(arg)) ? `unbound ${arg}` : `${arg} was not bound`)
+        // Unbinding means "that account is no longer this user": sign it out too.
+        const unbound = await s.unbindIdentity(arg)
+        const revoked = await s.revoke({ user: arg })
+        console.log(`${unbound ? `unbound ${arg}` : `${arg} was not bound`}; revoked ${revoked} token${revoked === 1 ? '' : 's'}`)
         return 0
       }
       const ids = s.identities()
