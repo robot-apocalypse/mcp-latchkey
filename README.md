@@ -24,7 +24,7 @@ claude.ai ──▶ https://mcp.example/<service>/mcp ──▶ latchkey ──�
   Pocket-ID, Keycloak, …) and each service lists who may use it. Removing someone takes effect
   on their next request.
 - **Wraps stdio and HTTP servers.** Runs stdio servers itself (one long-lived process each,
-  with only the environment you give it) or forwards to Streamable HTTP servers. Hide tools that
+  with only the environment you give it, never latchkey's secrets) or forwards to Streamable HTTP servers. Hide tools that
   make no sense remotely, keep upstream sessions alive, and get an audit line per tool call.
 - **Locked-down OAuth.** Codes only go to allowlisted redirect URIs; client metadata documents
   are fetched only from allowlisted URLs; tokens are stored hashed in an encrypted file.

@@ -58,9 +58,11 @@ Check it with `latchkey check-config` (in Docker:
 ### stdio servers
 
 Latchkey keeps exactly one process per stdio service and runs calls to it one
-at a time. The process gets only the `env` you list, `PATH`, and
-`HOME=<data_dir>/<service>` (so credentials it writes survive restarts). The
-image includes Node.js, so `npx` packages work:
+at a time. The process gets only the `env` you list, `PATH`,
+`HOME=<data_dir>/<service>` (so credentials it writes survive restarts) and the
+MCP SDK's non-secret defaults (`LOGNAME`, `SHELL`, `TERM`, `USER`); never
+latchkey's own environment or secrets. The image includes Node.js, so `npx`
+packages work:
 
 ```yaml
   toggl:

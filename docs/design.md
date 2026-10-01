@@ -72,8 +72,9 @@ Verified against claude.ai in `spike-results.md`.
 - **stdio upstreams:** exactly one long-lived child per service, spawned lazily,
   respawned on exit, calls serialized (mutation confirm tokens and rotating
   upstream credentials live in that one process). Each child gets **only**
-  `PATH` plus the env listed for that service in config, and its own `HOME`
-  under `data_dir/<svc>`. Never the gateway's own environment.
+  `PATH`, the env listed for that service in config, its own `HOME` under
+  `data_dir/<svc>`, and the MCP SDK's non-secret defaults (`LOGNAME`, `SHELL`,
+  `TERM`, `USER`). Never the gateway's own environment.
 - **HTTP upstreams:** URL plus optional credential presented to the upstream;
   the caller's bearer is never forwarded. Optional `X-MCP-User` header with the
   verified user.
