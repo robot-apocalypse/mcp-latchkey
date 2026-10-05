@@ -18,7 +18,8 @@ export function builtinHandler(cfg: Config): McpHandler {
         {
           name: 'whoami',
           description: 'Report which latchkey user and service this connection is signed in as.',
-          inputSchema: { type: 'object', properties: {} }
+          inputSchema: { type: 'object', properties: {} },
+          annotations: { title: 'Who am I', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
         }
       ]
     }))
